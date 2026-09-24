@@ -1,233 +1,275 @@
 //
+// server.js
 // BBBG Fusion Server
-// For BBBG watchOS app ONLY
+//
+// Prototype 1
+//
+// Apple Watch A
+//      ↓
+//    HTTPS
+//      ↓
+// BBBG Fusion Server
+//      ↓
+//    HTTPS
+//      ↓
+// Apple Watch B
+//
+// Supports:
+//   FF = FrostFire
+//   G  = Glacier
+//   Gt = Gentar
+//   S  = Supra
+//   Sr = Sori
+//   Sp = Sopan
 //
 
 const express = require("express");
-const cors = require("cors");
 
 const app = express();
 
-app.use(cors());
 app.use(express.json());
 
 // ============================================================
-// SERVER
+// MARK: - PORT
 // ============================================================
 
 const PORT = process.env.PORT || 3000;
 
-const WATCH_TIMEOUT_MS = 5 * 60 * 1000;
-const ROOM_TIMEOUT_MS = 60 * 60 * 1000;
-
-const SOUND_START_DELAY_MS = 1500;
-
-const MAX_WATCHES = 2;
-
 // ============================================================
-// SERVER IDENTITY
+// MARK: - ROOM STORAGE
 // ============================================================
 
-const SERVER_NAME = "BBBG Fusion Server";
-const APP_ID = "BBBG";
+/*
+Room structure:
 
-// ============================================================
-// ROOMS
-// ============================================================
+rooms = {
+    BBBG001: {
+        watches: {
+            WATCH_A: {
+                watchID,
+                app,
+                element,
+                tier,
+                lastSeen
+            },
+
+            WATCH_B: {
+                watchID,
+                app,
+                element,
+                tier,
+                lastSeen
+            }
+        },
+
+        event: {
+            id,
+            type,
+            sourceWatchID,
+            targetWatchID,
+            firstElement,
+            secondElement,
+            result,
+            timestamp
+        }
+    }
+}
+*/
 
 const rooms = new Map();
 
 // ============================================================
-// TIME
+// MARK: - HELPERS
 // ============================================================
 
-function serverNow() {
-    return Date.now();
+function getRoom(roomCode) {
+    return rooms.get(roomCode);
 }
 
-// ============================================================
-// HEALTH CHECK
-// ============================================================
+function createRoom(roomCode) {
+    const room = {
+        watches: {},
+        event: null
+    };
 
-app.get("/", (req, res) => {
-    res.json({
-        ok: true,
-        service: SERVER_NAME,
-        app: APP_ID,
-        serverNow: serverNow()
-    });
-});
+    rooms.set(roomCode, room);
 
-// ============================================================
-// ROOM HELPERS
-// ============================================================
+    return room;
+}
 
 function getOrCreateRoom(roomCode) {
 
-    let room = rooms.get(roomCode);
+    let room = getRoom(roomCode);
 
     if (!room) {
-
-        room = {
-            watches: new Map(),
-
-            pendingBump: null,
-
-            activeEvent: null,
-
-            createdAt: serverNow(),
-
-            updatedAt: serverNow()
-        };
-
-        rooms.set(roomCode, room);
+        room = createRoom(roomCode);
     }
 
     return room;
 }
 
+function now() {
+    return Date.now();
+}
+
 // ============================================================
-// CLEANUP
+// MARK: - VALID FUSIONS
 // ============================================================
 
-function cleanupRoom(room) {
+/*
+The server accepts these six fusion combinations.
 
-    const now = serverNow();
+Element names must match the Swift Element enum used
+by FusionBLE.
+*/
 
-    for (const [watchID, watch] of room.watches.entries()) {
+const FUSION_TABLE = {
 
-        if (
-            now - watch.lastSeen >
-            WATCH_TIMEOUT_MS
-        ) {
+    // Ice + Blaze
+    "blaze|ice": "ff",
 
-            room.watches.delete(watchID);
+    // Ice + Quake
+    "ice|quake": "g",
 
-            if (
-                room.pendingBump &&
-                room.pendingBump.watchID === watchID
-            ) {
+    // Thunder + Quake
+    "quake|thunder": "gt",
 
-                room.pendingBump = null;
-            }
-        }
+    // Solar + Thunder
+    "solar|thunder": "s",
+
+    // Solar + Thorn
+    "solar|thorn": "sr",
+
+    // Solar + Cyclone
+    "cyclone|solar": "sp"
+};
+
+// ============================================================
+// MARK: - ELEMENT NORMALIZATION
+// ============================================================
+
+function normalizeElement(element) {
+
+    if (!element) {
+        return null;
     }
+
+    return String(element)
+        .trim()
+        .toLowerCase();
 }
 
 // ============================================================
-// VALID FUSION PAIRS
+// MARK: - FUSION RESULT
 // ============================================================
 
-const validFusionPairs = new Set([
+function calculateFusion(firstElement, secondElement) {
 
-    "blaze|ice",
+    const first =
+        normalizeElement(firstElement);
 
-    "ice|quake",
+    const second =
+        normalizeElement(secondElement);
 
-    "quake|thunder",
+    if (!first || !second) {
+        return null;
+    }
 
-    "solar|thunder",
+    const sorted = [
+        first,
+        second
+    ].sort();
 
-    "solar|thorn",
+    const key =
+        `${sorted[0]}|${sorted[1]}`;
 
-    "cyclone|solar"
-]);
-
-function normalizePair(first, second) {
-
-    return `${first}|${second}`;
-}
-
-function isValidFusionPair(first, second) {
-
-    return validFusionPairs.has(
-        normalizePair(first, second)
-    );
+    return FUSION_TABLE[key] || null;
 }
 
 // ============================================================
-// REGISTER WATCH
+// MARK: - HEALTH CHECK
+// ============================================================
+
+app.get("/", (req, res) => {
+
+    res.json({
+        server: "BBBG Fusion Server",
+        status: "online",
+        prototype: "Prototype 1",
+
+        supportedFusions: [
+            "ff",
+            "g",
+            "gt",
+            "s",
+            "sr",
+            "sp"
+        ],
+
+        timestamp: now()
+    });
+});
+
+// ============================================================
+// MARK: - REGISTER WATCH
 // ============================================================
 
 app.post("/room/register", (req, res) => {
 
     const {
-        room,
-        watchID
+        roomCode,
+        watchID,
+        app: appName
     } = req.body;
 
-    if (!room || !watchID) {
+    // --------------------------------------------------------
+    // Validate
+    // --------------------------------------------------------
+
+    if (!roomCode || !watchID) {
 
         return res.status(400).json({
-
-            ok: false,
-
-            error:
-                "room and watchID are required",
-
-            serverNow:
-                serverNow()
+            error: "roomCode and watchID are required"
         });
     }
 
-    const roomData =
-        getOrCreateRoom(room);
-
-    cleanupRoom(roomData);
+    const room =
+        getOrCreateRoom(roomCode);
 
     // --------------------------------------------------------
-    // Existing watch
+    // Already registered
     // --------------------------------------------------------
 
-    if (
-        roomData.watches.has(watchID)
-    ) {
+    if (room.watches[watchID]) {
 
-        const existing =
-            roomData.watches.get(watchID);
+        room.watches[watchID].lastSeen = now();
 
-        existing.lastSeen =
-            serverNow();
-
-        roomData.updatedAt =
-            serverNow();
+        if (appName) {
+            room.watches[watchID].app = appName;
+        }
 
         return res.json({
-
-            ok: true,
-
-            registered: true,
-
-            room,
-
+            success: true,
+            message: "Watch already registered",
+            roomCode,
             watchID,
-
-            watchCount:
-                roomData.watches.size,
-
-            serverNow:
-                serverNow()
+            watchCount: Object.keys(room.watches).length
         });
     }
 
     // --------------------------------------------------------
-    // Maximum two watches
+    // Maximum 2 watches
     // --------------------------------------------------------
 
-    if (
-        roomData.watches.size >=
-        MAX_WATCHES
-    ) {
+    const watchCount =
+        Object.keys(room.watches).length;
+
+    if (watchCount >= 2) {
 
         return res.status(409).json({
-
-            ok: false,
-
-            error:
-                "Room already has two watches",
-
-            serverNow:
-                serverNow()
+            error: "Room already has two Watches",
+            roomCode,
+            watchCount
         });
     }
 
@@ -235,1075 +277,717 @@ app.post("/room/register", (req, res) => {
     // Register
     // --------------------------------------------------------
 
-    roomData.watches.set(
+    room.watches[watchID] = {
+
         watchID,
-        {
-            watchID,
 
-            element: null,
+        app: appName || "BBBG",
 
-            tier: null,
+        element: null,
 
-            lastSeen:
-                serverNow()
-        }
-    );
+        tier: 0,
 
-    roomData.updatedAt =
-        serverNow();
+        lastSeen: now()
+    };
 
     console.log(
-        `📱 [BBBG] Watch registered: ${watchID} in room ${room}`
+        `📱 WATCH REGISTERED`,
+        roomCode,
+        watchID
     );
 
-    res.json({
+    return res.json({
 
-        ok: true,
+        success: true,
 
-        registered: true,
+        message: "Watch registered",
 
-        room,
+        roomCode,
 
         watchID,
 
         watchCount:
-            roomData.watches.size,
-
-        serverNow:
-            serverNow()
+            Object.keys(room.watches).length
     });
 });
 
 // ============================================================
-// UPDATE WATCH STATE
+// MARK: - UPDATE WATCH STATE
 // ============================================================
 
 app.post("/room/state", (req, res) => {
 
     const {
-        room,
+        roomCode,
         watchID,
         element,
-        tier
+        tier,
+        app: appName
     } = req.body;
 
-    if (!room || !watchID) {
+    if (!roomCode || !watchID) {
 
         return res.status(400).json({
-
-            ok: false,
-
-            error:
-                "room and watchID are required",
-
-            serverNow:
-                serverNow()
+            error: "roomCode and watchID are required"
         });
     }
 
-    const roomData =
-        rooms.get(room);
+    const room =
+        getRoom(roomCode);
 
-    if (!roomData) {
+    if (!room) {
 
         return res.status(404).json({
-
-            ok: false,
-
-            error:
-                "Room not found",
-
-            serverNow:
-                serverNow()
+            error: "Room not found"
         });
     }
 
     const watch =
-        roomData.watches.get(watchID);
+        room.watches[watchID];
 
     if (!watch) {
 
         return res.status(404).json({
-
-            ok: false,
-
-            error:
-                "Watch not registered",
-
-            serverNow:
-                serverNow()
+            error: "Watch not registered"
         });
     }
 
-    watch.lastSeen =
-        serverNow();
+    // --------------------------------------------------------
+    // Update state
+    // --------------------------------------------------------
 
-    if (
-        typeof element === "string" &&
-        element.length > 0
-    ) {
+    if (element !== undefined) {
 
         watch.element =
-            element;
+            normalizeElement(element);
     }
 
-    if (
-        typeof tier === "number" &&
-        Number.isFinite(tier)
-    ) {
+    if (tier !== undefined) {
 
         watch.tier =
-            tier;
+            Number(tier);
     }
 
-    roomData.updatedAt =
-        serverNow();
+    if (appName) {
 
-    res.json({
+        watch.app =
+            appName;
+    }
 
-        ok: true,
+    watch.lastSeen = now();
 
-        serverNow:
-            serverNow()
+    console.log(
+        `📡 STATE`,
+        roomCode,
+        watchID,
+        watch.element,
+        `Tier ${watch.tier}`
+    );
+
+    return res.json({
+
+        success: true,
+
+        roomCode,
+
+        watchID,
+
+        element: watch.element,
+
+        tier: watch.tier,
+
+        lastSeen: watch.lastSeen
     });
 });
 
 // ============================================================
-// FIST BUMP
+// MARK: - FIST BUMP
 // ============================================================
 
 app.post("/room/bump", (req, res) => {
 
     const {
-        room,
+        roomCode,
         watchID,
+        eventID,
         element,
-        tier,
-        bumpID
+        tier
     } = req.body;
 
-    if (!room || !watchID) {
+    // --------------------------------------------------------
+    // Validate
+    // --------------------------------------------------------
+
+    if (!roomCode || !watchID) {
+
+        return res.status(400).json({
+            error: "roomCode and watchID are required"
+        });
+    }
+
+    const room =
+        getRoom(roomCode);
+
+    if (!room) {
+
+        return res.status(404).json({
+            error: "Room not found"
+        });
+    }
+
+    const sourceWatch =
+        room.watches[watchID];
+
+    if (!sourceWatch) {
+
+        return res.status(404).json({
+            error: "Watch not registered"
+        });
+    }
+
+    // --------------------------------------------------------
+    // Find other Watch
+    // --------------------------------------------------------
+
+    const otherWatchID =
+        Object.keys(room.watches)
+            .find(id => id !== watchID);
+
+    if (!otherWatchID) {
+
+        return res.status(409).json({
+            error: "Waiting for second Watch"
+        });
+    }
+
+    const otherWatch =
+        room.watches[otherWatchID];
+
+    // --------------------------------------------------------
+    // Update source Watch state
+    // --------------------------------------------------------
+
+    sourceWatch.element =
+        normalizeElement(element);
+
+    sourceWatch.tier =
+        Number(tier);
+
+    sourceWatch.lastSeen =
+        now();
+
+    // --------------------------------------------------------
+    // Check Tier
+    // --------------------------------------------------------
+
+    if (sourceWatch.tier < 2) {
 
         return res.status(400).json({
 
-            ok: false,
-
             error:
-                "room and watchID are required",
+                "Fusion requires Tier 2 elements",
 
-            serverNow:
-                serverNow()
+            tier:
+                sourceWatch.tier
         });
     }
 
-    const roomData =
-        rooms.get(room);
-
-    if (!roomData) {
-
-        return res.status(404).json({
-
-            ok: false,
-
-            error:
-                "Room not found",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    const watch =
-        roomData.watches.get(watchID);
-
-    if (!watch) {
-
-        return res.status(404).json({
-
-            ok: false,
-
-            error:
-                "Watch not registered",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    watch.lastSeen =
-        serverNow();
-
-    // --------------------------------------------------------
-    // Tier 2 only
-    // --------------------------------------------------------
-
-    if (tier !== 2) {
-
-        return res.json({
-
-            ok: false,
-
-            invalidPair: true,
-
-            reason:
-                "Fusion requires Tier 2",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    if (!element) {
+    if (otherWatch.tier < 2) {
 
         return res.status(400).json({
 
-            ok: false,
-
             error:
-                "element is required",
+                "Other Watch is not using Tier 2",
 
-            serverNow:
-                serverNow()
-        });
-    }
-
-    watch.element =
-        element;
-
-    watch.tier =
-        tier;
-
-    // --------------------------------------------------------
-    // Fusion already active
-    // --------------------------------------------------------
-
-    if (roomData.activeEvent) {
-
-        return res.json({
-
-            ok: false,
-
-            error:
-                "Fusion already in progress",
-
-            serverNow:
-                serverNow()
+            otherTier:
+                otherWatch.tier
         });
     }
 
     // --------------------------------------------------------
-    // Same watch cannot bump itself
+    // Check elements
     // --------------------------------------------------------
 
-    if (
-        roomData.pendingBump &&
-        roomData.pendingBump.watchID === watchID
-    ) {
+    if (!sourceWatch.element) {
 
-        return res.json({
-
-            ok: true,
-
-            waitingForPartner: true,
-
-            serverNow:
-                serverNow()
+        return res.status(400).json({
+            error: "Source Watch has no element"
         });
     }
 
-    // ========================================================
-    // FIRST WATCH
-    // ========================================================
+    if (!otherWatch.element) {
 
-    if (!roomData.pendingBump) {
+        return res.status(400).json({
+            error: "Other Watch has no element"
+        });
+    }
 
-        roomData.pendingBump = {
+    // --------------------------------------------------------
+    // Calculate fusion
+    // --------------------------------------------------------
 
-            watchID,
-
-            element,
-
-            tier,
-
-            bumpID:
-                bumpID || null,
-
-            createdAt:
-                serverNow()
-        };
-
-        roomData.updatedAt =
-            serverNow();
-
-        console.log(
-            `👊 [BBBG] First bump: ${watchID} (${element})`
+    const result =
+        calculateFusion(
+            sourceWatch.element,
+            otherWatch.element
         );
 
-        return res.json({
-
-            ok: true,
-
-            waitingForPartner: true,
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    // ========================================================
-    // SECOND WATCH
-    // ========================================================
-
-    const first =
-        roomData.pendingBump;
-
-    const second = {
-
-        watchID,
-
-        element,
-
-        tier
-    };
-
-    console.log(
-        `👊 [BBBG] Second bump: ${watchID} (${element})`
-    );
-
     // --------------------------------------------------------
-    // Validate pair
+    // Invalid combination
     // --------------------------------------------------------
 
-    if (
-        !isValidFusionPair(
-            first.element,
-            second.element
-        )
-    ) {
+    if (!result) {
 
         console.log(
-            `⚠️ [BBBG] Invalid fusion pair: ` +
-            `${first.element} + ${second.element}`
+            `❌ NO FUSION`,
+            sourceWatch.element,
+            "+",
+            otherWatch.element
         );
-
-        return res.json({
-
-            ok: false,
-
-            invalidPair: true,
-
-            waitingForPartner: true,
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    // ========================================================
-    // VALID PAIR
-    // ========================================================
-
-    const eventID =
-        cryptoRandomID();
-
-    const playAt =
-        serverNow() +
-        SOUND_START_DELAY_MS;
-
-    roomData.activeEvent = {
-
-        type:
-            "FUSION_SOUND_START",
-
-        eventID,
-
-        firstWatchID:
-            first.watchID,
-
-        firstElement:
-            first.element,
-
-        firstTier:
-            first.tier,
-
-        secondWatchID:
-            second.watchID,
-
-        secondElement:
-            second.element,
-
-        secondTier:
-            second.tier,
-
-        playAt,
-
-        soundFinished:
-            new Set(),
-
-        fusionCompleted:
-            new Set()
-    };
-
-    roomData.pendingBump =
-        null;
-
-    roomData.updatedAt =
-        serverNow();
-
-    console.log(
-        "🔥 [BBBG] VALID FUSION PAIR"
-    );
-
-    console.log(
-        `   ${first.element} + ${second.element}`
-    );
-
-    console.log(
-        `   Event: ${eventID}`
-    );
-
-    console.log(
-        `   Play at: ${playAt}`
-    );
-
-    res.json({
-
-        ok: true,
-
-        fusionStarted: true,
-
-        eventID,
-
-        playAt,
-
-        serverNow:
-            serverNow()
-    });
-});
-
-// ============================================================
-// POLL
-// ============================================================
-
-app.get("/room/poll", (req, res) => {
-
-    const {
-        room,
-        watchID
-    } = req.query;
-
-    if (!room || !watchID) {
 
         return res.status(400).json({
 
-            ok: false,
-
             error:
-                "room and watchID are required",
+                "Invalid fusion combination",
 
-            serverNow:
-                serverNow()
+            firstElement:
+                sourceWatch.element,
+
+            secondElement:
+                otherWatch.element
         });
     }
 
-    const roomData =
-        rooms.get(room);
+    // --------------------------------------------------------
+    // Create event
+    // --------------------------------------------------------
 
-    if (!roomData) {
-
-        return res.status(404).json({
-
-            ok: false,
-
-            error:
-                "Room not found",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    const watch =
-        roomData.watches.get(watchID);
-
-    if (!watch) {
-
-        return res.status(404).json({
-
-            ok: false,
-
-            error:
-                "Watch not registered",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    watch.lastSeen =
-        serverNow();
-
-    cleanupRoom(roomData);
-
-    if (!roomData.activeEvent) {
-
-        return res.json({
-
-            ok: true,
-
-            event: null,
-
-            watchCount:
-                roomData.watches.size,
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    const active =
-        roomData.activeEvent;
-
-    const isParticipant =
-        watchID === active.firstWatchID ||
-        watchID === active.secondWatchID;
-
-    if (!isParticipant) {
-
-        return res.json({
-
-            ok: true,
-
-            event: null,
-
-            watchCount:
-                roomData.watches.size,
-
-            serverNow:
-                serverNow()
-        });
-    }
+    const finalEventID =
+        eventID ||
+        `${watchID}-${now()}`;
 
     const event = {
 
-        type:
-            active.type,
+        id: finalEventID,
 
-        eventID:
-            active.eventID,
+        type: "BUMP",
 
-        firstWatchID:
-            active.firstWatchID,
+        sourceWatchID:
+            watchID,
+
+        targetWatchID:
+            otherWatchID,
 
         firstElement:
-            active.firstElement,
-
-        firstTier:
-            active.firstTier,
-
-        secondWatchID:
-            active.secondWatchID,
+            sourceWatch.element,
 
         secondElement:
-            active.secondElement,
+            otherWatch.element,
 
-        secondTier:
-            active.secondTier,
+        result,
 
-        playAt:
-            active.playAt
+        timestamp:
+            now()
     };
 
-    res.json({
+    room.event = event;
 
-        ok: true,
+    // --------------------------------------------------------
+    // Log
+    // --------------------------------------------------------
 
-        event,
-
-        watchCount:
-            roomData.watches.size,
-
-        serverNow:
-            serverNow()
-    });
-});
-
-// ============================================================
-// SOUND FINISHED
-// ============================================================
-
-app.post("/room/sound-finished", (req, res) => {
-
-    const {
-        room,
-        watchID,
-        eventID
-    } = req.body;
-
-    if (!room || !watchID || !eventID) {
-
-        return res.status(400).json({
-
-            ok: false,
-
-            error:
-                "room, watchID and eventID are required",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    const roomData =
-        rooms.get(room);
-
-    if (!roomData) {
-
-        return res.status(404).json({
-
-            ok: false,
-
-            error:
-                "Room not found",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    const watch =
-        roomData.watches.get(watchID);
-
-    if (!watch) {
-
-        return res.status(404).json({
-
-            ok: false,
-
-            error:
-                "Watch not registered",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    watch.lastSeen =
-        serverNow();
-
-    const active =
-        roomData.activeEvent;
-
-    if (!active) {
-
-        return res.status(404).json({
-
-            ok: false,
-
-            error:
-                "No active fusion event",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    if (
-        active.eventID !== eventID
-    ) {
-
-        return res.status(409).json({
-
-            ok: false,
-
-            error:
-                "Event ID does not match",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    const isParticipant =
-        watchID === active.firstWatchID ||
-        watchID === active.secondWatchID;
-
-    if (!isParticipant) {
-
-        return res.status(403).json({
-
-            ok: false,
-
-            error:
-                "Watch is not part of this fusion",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    active.soundFinished.add(
+    console.log("");
+    console.log("🤜🤛 FIST BUMP");
+    console.log(
+        "Room:",
+        roomCode
+    );
+    console.log(
+        "Source:",
         watchID
     );
-
-    roomData.updatedAt =
-        serverNow();
-
-    const bothSoundsFinished =
-        active.soundFinished.has(
-            active.firstWatchID
-        ) &&
-        active.soundFinished.has(
-            active.secondWatchID
-        );
-
     console.log(
-        `🔊 [BBBG] Sound finished: ${watchID}`
+        "Target:",
+        otherWatchID
     );
-
     console.log(
-        `   ${active.soundFinished.size}/2 watches finished`
+        "Elements:",
+        sourceWatch.element,
+        "+",
+        otherWatch.element
     );
+    console.log(
+        "Fusion:",
+        result
+    );
+    console.log(
+        "Event:",
+        finalEventID
+    );
+    console.log("");
 
-    if (bothSoundsFinished) {
+    // --------------------------------------------------------
+    // Response
+    // --------------------------------------------------------
 
-        active.type =
-            "FUSION_EXECUTE";
+    return res.json({
 
-        console.log(
-            "🔥 [BBBG] BOTH SOUNDS FINISHED"
-        );
+        success: true,
 
-        console.log(
-            "🔥 [BBBG] FUSION_EXECUTE READY"
-        );
-    }
-
-    res.json({
-
-        ok: true,
-
-        soundFinished: true,
-
-        bothSoundsFinished,
-
-        serverNow:
-            serverNow()
+        event: event
     });
 });
 
 // ============================================================
-// FUSION COMPLETE
-// ============================================================
-
-app.post("/room/fusion-complete", (req, res) => {
-
-    const {
-        room,
-        watchID,
-        eventID
-    } = req.body;
-
-    if (!room || !watchID || !eventID) {
-
-        return res.status(400).json({
-
-            ok: false,
-
-            error:
-                "room, watchID and eventID are required",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    const roomData =
-        rooms.get(room);
-
-    if (!roomData) {
-
-        return res.status(404).json({
-
-            ok: false,
-
-            error:
-                "Room not found",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    const watch =
-        roomData.watches.get(watchID);
-
-    if (!watch) {
-
-        return res.status(404).json({
-
-            ok: false,
-
-            error:
-                "Watch not registered",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    watch.lastSeen =
-        serverNow();
-
-    const active =
-        roomData.activeEvent;
-
-    if (!active) {
-
-        return res.status(404).json({
-
-            ok: false,
-
-            error:
-                "No active fusion event",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    if (
-        active.eventID !== eventID
-    ) {
-
-        return res.status(409).json({
-
-            ok: false,
-
-            error:
-                "Event ID does not match",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    const isParticipant =
-        watchID === active.firstWatchID ||
-        watchID === active.secondWatchID;
-
-    if (!isParticipant) {
-
-        return res.status(403).json({
-
-            ok: false,
-
-            error:
-                "Watch is not part of this fusion",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    if (
-        active.type !==
-        "FUSION_EXECUTE"
-    ) {
-
-        return res.status(409).json({
-
-            ok: false,
-
-            error:
-                "Fusion cannot complete before FUSION_EXECUTE",
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    active.fusionCompleted.add(
-        watchID
-    );
-
-    roomData.updatedAt =
-        serverNow();
-
-    const bothCompleted =
-        active.fusionCompleted.has(
-            active.firstWatchID
-        ) &&
-        active.fusionCompleted.has(
-            active.secondWatchID
-        );
-
-    console.log(
-        `✅ [BBBG] Fusion complete: ${watchID}`
-    );
-
-    console.log(
-        `   ${active.fusionCompleted.size}/2 watches completed`
-    );
-
-    if (bothCompleted) {
-
-        console.log(
-            "🎉 [BBBG] BOTH WATCHES COMPLETED FUSION"
-        );
-
-        roomData.activeEvent =
-            null;
-
-        roomData.updatedAt =
-            serverNow();
-
-        return res.json({
-
-            ok: true,
-
-            fusionComplete: true,
-
-            roomReset: true,
-
-            serverNow:
-                serverNow()
-        });
-    }
-
-    res.json({
-
-        ok: true,
-
-        fusionComplete: false,
-
-        waitingForPartner: true,
-
-        serverNow:
-            serverNow()
-    });
-});
-
-// ============================================================
-// GENERIC EVENT
+// MARK: - CREATE / UPDATE FUSION EVENT
 // ============================================================
 
 app.post("/room/event", (req, res) => {
 
     const {
-        room,
+        roomCode,
         watchID,
-        event
+        eventID,
+        type,
+        result,
+        firstElement,
+        secondElement
     } = req.body;
 
-    const roomData =
-        rooms.get(room);
+    if (!roomCode || !watchID) {
 
-    if (!roomData) {
+        return res.status(400).json({
+            error: "roomCode and watchID are required"
+        });
+    }
+
+    const room =
+        getRoom(roomCode);
+
+    if (!room) {
 
         return res.status(404).json({
-
-            ok: false,
-
-            error:
-                "Room not found",
-
-            serverNow:
-                serverNow()
+            error: "Room not found"
         });
     }
 
     const watch =
-        roomData.watches.get(watchID);
+        room.watches[watchID];
 
     if (!watch) {
 
         return res.status(404).json({
-
-            ok: false,
-
-            error:
-                "Watch not registered",
-
-            serverNow:
-                serverNow()
+            error: "Watch not registered"
         });
     }
 
-    watch.lastSeen =
-        serverNow();
+    // --------------------------------------------------------
+    // If a fusion result was supplied, validate it
+    // --------------------------------------------------------
+
+    if (result) {
+
+        const calculated =
+            calculateFusion(
+                firstElement,
+                secondElement
+            );
+
+        if (
+            calculated &&
+            calculated !== result
+        ) {
+
+            return res.status(400).json({
+
+                error:
+                    "Fusion result does not match elements",
+
+                calculated,
+
+                supplied:
+                    result
+            });
+        }
+    }
+
+    // --------------------------------------------------------
+    // Preserve existing event
+    // --------------------------------------------------------
+
+    const existingEvent =
+        room.event;
+
+    const event = {
+
+        id:
+            eventID ||
+            existingEvent?.id ||
+            `${watchID}-${now()}`,
+
+        type:
+            type ||
+            "FUSION_RESULT",
+
+        sourceWatchID:
+            existingEvent?.sourceWatchID ||
+            watchID,
+
+        targetWatchID:
+            existingEvent?.targetWatchID ||
+            Object.keys(room.watches)
+                .find(id => id !== watchID) ||
+            null,
+
+        firstElement:
+            firstElement ||
+            existingEvent?.firstElement ||
+            null,
+
+        secondElement:
+            secondElement ||
+            existingEvent?.secondElement ||
+            null,
+
+        result:
+            result ||
+            existingEvent?.result ||
+            null,
+
+        timestamp:
+            now()
+    };
+
+    room.event = event;
 
     console.log(
-        `📡 [BBBG] Generic event from ${watchID}:`,
-        event
+        `⚡ FUSION EVENT`,
+        roomCode,
+        event.result
     );
 
-    res.json({
+    return res.json({
 
-        ok: true,
+        success: true,
 
-        serverNow:
-            serverNow()
+        event
     });
 });
 
 // ============================================================
-// EVENT ID
+// MARK: - POLL
 // ============================================================
 
-function cryptoRandomID() {
+app.get("/room/poll", (req, res) => {
 
-    return (
-        Date.now().toString(36) +
-        "-" +
-        Math.random()
-            .toString(36)
-            .substring(2, 12)
-    );
-}
+    const {
+        roomCode,
+        watchID,
+        since
+    } = req.query;
 
-// ============================================================
-// ROOM CLEANUP
-// ============================================================
+    if (!roomCode || !watchID) {
 
-setInterval(() => {
+        return res.status(400).json({
+            error: "roomCode and watchID are required"
+        });
+    }
 
-    const now =
-        serverNow();
+    const room =
+        getRoom(roomCode);
 
-    for (
-        const [roomCode, room]
-        of rooms.entries()
-    ) {
+    if (!room) {
 
-        cleanupRoom(room);
+        return res.status(404).json({
+            error: "Room not found"
+        });
+    }
+
+    const watch =
+        room.watches[watchID];
+
+    if (!watch) {
+
+        return res.status(404).json({
+            error: "Watch not registered"
+        });
+    }
+
+    watch.lastSeen = now();
+
+    // --------------------------------------------------------
+    // Other Watch
+    // --------------------------------------------------------
+
+    const otherWatchID =
+        Object.keys(room.watches)
+            .find(id => id !== watchID);
+
+    const otherWatch =
+        otherWatchID
+            ? room.watches[otherWatchID]
+            : null;
+
+    // --------------------------------------------------------
+    // Event filtering
+    // --------------------------------------------------------
+
+    let event = room.event;
+
+    if (since && event) {
+
+        const sinceNumber =
+            Number(since);
 
         if (
-            room.watches.size === 0 &&
-            now - room.updatedAt >
-                ROOM_TIMEOUT_MS
+            Number.isFinite(sinceNumber) &&
+            event.timestamp <= sinceNumber
         ) {
-
-            rooms.delete(
-                roomCode
-            );
-
-            console.log(
-                `🧹 [BBBG] Removed inactive room: ${roomCode}`
-            );
+            event = null;
         }
     }
 
-}, 60 * 1000);
+    // --------------------------------------------------------
+    // Response
+    // --------------------------------------------------------
+
+    return res.json({
+
+        success: true,
+
+        roomCode,
+
+        watchID,
+
+        otherWatch:
+            otherWatch
+                ? {
+                    watchID:
+                        otherWatch.watchID,
+
+                    app:
+                        otherWatch.app,
+
+                    element:
+                        otherWatch.element,
+
+                    tier:
+                        otherWatch.tier,
+
+                    lastSeen:
+                        otherWatch.lastSeen
+                }
+                : null,
+
+        event
+    });
+});
 
 // ============================================================
-// START
+// MARK: - RESET ROOM
+// ============================================================
+
+app.post("/room/reset", (req, res) => {
+
+    const {
+        roomCode
+    } = req.body;
+
+    if (!roomCode) {
+
+        return res.status(400).json({
+            error: "roomCode is required"
+        });
+    }
+
+    const room =
+        getRoom(roomCode);
+
+    if (!room) {
+
+        return res.status(404).json({
+            error: "Room not found"
+        });
+    }
+
+    room.event = null;
+
+    Object.values(room.watches)
+        .forEach(watch => {
+
+            watch.element = null;
+            watch.tier = 0;
+        });
+
+    console.log(
+        `🔄 ROOM RESET: ${roomCode}`
+    );
+
+    return res.json({
+
+        success: true,
+
+        message:
+            "Room reset",
+
+        roomCode
+    });
+});
+
+// ============================================================
+// MARK: - DEBUG ROOM
+// ============================================================
+
+app.get("/room/:roomCode", (req, res) => {
+
+    const roomCode =
+        req.params.roomCode;
+
+    const room =
+        getRoom(roomCode);
+
+    if (!room) {
+
+        return res.status(404).json({
+            error: "Room not found"
+        });
+    }
+
+    return res.json({
+
+        roomCode,
+
+        watches:
+            room.watches,
+
+        event:
+            room.event
+    });
+});
+
+// ============================================================
+// MARK: - START SERVER
 // ============================================================
 
 app.listen(PORT, () => {
 
+    console.log("");
+    console.log("==========================================");
+    console.log("   BBBG FUSION SERVER");
+    console.log("==========================================");
+    console.log("");
     console.log(
-        `🚀 ${SERVER_NAME} running on port ${PORT}`
+        `🚀 Server running on port ${PORT}`
     );
-
+    console.log("");
+    console.log("Supported fusions:");
+    console.log("🔥 Ice + Blaze     = FF");
+    console.log("❄️  Ice + Quake     = G");
+    console.log("⚡ Thunder + Quake  = Gt");
+    console.log("☀️  Solar + Thunder = S");
+    console.log("🌞 Solar + Thorn    = Sr");
+    console.log("🌪️  Solar + Cyclone = Sp");
+    console.log("");
+    console.log("==========================================");
+    console.log("");
 });
