@@ -5,24 +5,25 @@
 // Prototype 1
 //
 // Apple Watch A
-//      ↓
-//    HTTPS
-//      ↓
+//       ↓
+//     HTTPS
+//       ↓
 // BBBG Fusion Server
-//      ↓
-//    HTTPS
-//      ↓
+//       ↓
+//     HTTPS
+//       ↓
 // Apple Watch B
 //
-// Fusion calculation remains CLIENT-SIDE.
+// Fusion calculation remains SERVER-SIDE.
 //
-// Supported:
-//   FF = FrostFire
-//   G  = Glacier
-//   Gt = Gentar
-//   S  = Supra
-//   Sr = Sori
-//   Sp = Sopan
+// Important:
+// - Both watches must perform a fist bump.
+// - A fusion is created only after BOTH watches bump.
+// - Every fusion gets a NEW fusionID/eventID.
+// - The same fusion event is delivered to BOTH watches.
+// - Each watch acknowledges the fusion.
+// - The server does not require a timing limit.
+// - Fusion #2, #3, #4... work independently.
 //
 
 const express = require("express");
@@ -31,10 +32,6 @@ const app = express();
 
 app.use(express.json());
 
-// ============================================================
-// MARK: - PORT
-// ============================================================
-
 const PORT = process.env.PORT || 3000;
 
 // ============================================================
@@ -42,6 +39,42 @@ const PORT = process.env.PORT || 3000;
 // ============================================================
 
 const rooms = new Map();
+
+// Room:
+//
+// {
+//     watches: {
+//         watchID: {
+//             watchID,
+//             app,
+//             element,
+//             tier,
+//             lastSeen,
+//             bump: {
+//                 eventID,
+//                 element,
+//                 tier,
+//                 createdAt
+//             }
+//         }
+//     },
+//
+//     fusion: {
+//         fusionID,
+//         eventID,
+//         type,
+//         result,
+//         createdAt,
+//         sourceWatchID,
+//         targetWatchID,
+//         watches: {
+//             watchA: false,
+//             watchB: false
+//         }
+//     } | null
+//
+// }
+
 
 // ============================================================
 // MARK: - HELPERS
@@ -52,7 +85,6 @@ function now() {
 }
 
 function normalizeElement(element) {
-
     if (!element) {
         return null;
     }
@@ -74,7 +106,7 @@ function getOrCreateRoom(roomCode) {
 
         room = {
             watches: {},
-            event: null
+            fusion: null
         };
 
         rooms.set(roomCode, room);
@@ -84,9 +116,15 @@ function getOrCreateRoom(roomCode) {
 }
 
 function getRoomCode(body) {
-
     return body.roomCode || body.room || null;
 }
+
+function makeID(prefix) {
+    return `${prefix}-${now()}-${Math.random()
+        .toString(36)
+        .substring(2, 10)}`;
+}
+
 
 // ============================================================
 // MARK: - SIX FUSIONS
@@ -112,6 +150,7 @@ const FUSION_TABLE = {
     // Solar + Cyclone
     "cyclone|solar": "sp"
 };
+
 
 // ============================================================
 // MARK: - CALCULATE FUSION
@@ -140,94 +179,54 @@ function calculateFusion(firstElement, secondElement) {
     return FUSION_TABLE[key] || null;
 }
 
+
 // ============================================================
-// MARK: - BUILD SWIFT BUMP EVENT
+// MARK: - CREATE FUSION EVENT
 // ============================================================
 
-/*
-    IMPORTANT
-
-    This function creates the exact JSON structure
-    expected by FusionBLE.ServerEvent:
-
-        watchID
-        eventID
-        type
-        element
-        tier
-        result
-        createdAt
-*/
-
-function makeBumpEvent({
-    watchID,
+function makeFusionEvent({
+    fusionID,
     eventID,
-    element,
-    tier,
+    sourceWatchID,
+    targetWatchID,
+    sourceElement,
+    targetElement,
+    sourceTier,
+    targetTier,
     result
 }) {
 
     return {
 
-        watchID:
-            watchID,
+        type: "FUSION",
 
-        eventID:
-            eventID,
+        fusionID,
 
-        type:
-            "BUMP",
+        eventID,
 
-        element:
-            normalizeElement(element),
+        sourceWatchID,
 
-        tier:
-            Number(tier),
+        targetWatchID,
 
-        result:
-            result || null,
+        sourceElement:
+            normalizeElement(sourceElement),
 
-        createdAt:
-            now()
-    };
-}
+        targetElement:
+            normalizeElement(targetElement),
 
-// ============================================================
-// MARK: - BUILD FUSION RESULT EVENT
-// ============================================================
+        sourceTier:
+            Number(sourceTier),
 
-function makeFusionResultEvent({
-    watchID,
-    eventID,
-    result,
-    element,
-    tier
-}) {
+        targetTier:
+            Number(targetTier),
 
-    return {
-
-        watchID:
-            watchID,
-
-        eventID:
-            eventID,
-
-        type:
-            "FUSION_RESULT",
-
-        element:
-            normalizeElement(element) || "",
-
-        tier:
-            Number(tier || 0),
-
-        result:
-            result,
+        result,
 
         createdAt:
             now()
     };
 }
+
 
 // ============================================================
 // MARK: - HEALTH CHECK
@@ -247,7 +246,6 @@ app.get("/", (req, res) => {
             "Prototype 1",
 
         supportedFusions: [
-
             "ff",
             "g",
             "gt",
@@ -260,6 +258,7 @@ app.get("/", (req, res) => {
             now()
     });
 });
+
 
 // ============================================================
 // MARK: - REGISTER WATCH
@@ -277,6 +276,7 @@ app.post("/room/register", (req, res) => {
         tier
     } = req.body;
 
+
     // --------------------------------------------------------
     // Validate
     // --------------------------------------------------------
@@ -290,12 +290,14 @@ app.post("/room/register", (req, res) => {
         });
     }
 
+
     // --------------------------------------------------------
-    // Get room
+    // Room
     // --------------------------------------------------------
 
     const room =
         getOrCreateRoom(roomCode);
+
 
     // --------------------------------------------------------
     // Existing Watch
@@ -315,13 +317,11 @@ app.post("/room/register", (req, res) => {
         }
 
         if (element !== undefined) {
-
             watch.element =
                 normalizeElement(element);
         }
 
         if (tier !== undefined) {
-
             watch.tier =
                 Number(tier);
         }
@@ -347,6 +347,7 @@ app.post("/room/register", (req, res) => {
         });
     }
 
+
     // --------------------------------------------------------
     // Maximum two Watches
     // --------------------------------------------------------
@@ -367,6 +368,7 @@ app.post("/room/register", (req, res) => {
         });
     }
 
+
     // --------------------------------------------------------
     // Register
     // --------------------------------------------------------
@@ -379,7 +381,7 @@ app.post("/room/register", (req, res) => {
             appName || "BBBG",
 
         element:
-            element
+            element !== undefined
                 ? normalizeElement(element)
                 : null,
 
@@ -389,8 +391,12 @@ app.post("/room/register", (req, res) => {
                 : 1,
 
         lastSeen:
-            now()
+            now(),
+
+        bump:
+            null
     };
+
 
     console.log("");
     console.log("📱 WATCH REGISTERED");
@@ -403,6 +409,10 @@ app.post("/room/register", (req, res) => {
         watchID
     );
     console.log(
+        "App:",
+        room.watches[watchID].app
+    );
+    console.log(
         "Element:",
         room.watches[watchID].element
     );
@@ -411,6 +421,7 @@ app.post("/room/register", (req, res) => {
         room.watches[watchID].tier
     );
     console.log("");
+
 
     return res.json({
 
@@ -429,6 +440,7 @@ app.post("/room/register", (req, res) => {
     });
 });
 
+
 // ============================================================
 // MARK: - UPDATE WATCH STATE
 // ============================================================
@@ -445,6 +457,7 @@ app.post("/room/state", (req, res) => {
         app: appName
     } = req.body;
 
+
     // --------------------------------------------------------
     // Validate
     // --------------------------------------------------------
@@ -457,6 +470,7 @@ app.post("/room/state", (req, res) => {
                 "room/roomCode and watchID are required"
         });
     }
+
 
     // --------------------------------------------------------
     // Room
@@ -474,6 +488,7 @@ app.post("/room/state", (req, res) => {
         });
     }
 
+
     // --------------------------------------------------------
     // Watch
     // --------------------------------------------------------
@@ -489,6 +504,7 @@ app.post("/room/state", (req, res) => {
                 "Watch not registered"
         });
     }
+
 
     // --------------------------------------------------------
     // Update
@@ -515,10 +531,12 @@ app.post("/room/state", (req, res) => {
     watch.lastSeen =
         now();
 
+
     console.log(
         `📡 STATE ${roomCode} ${watchID} ` +
         `${watch.element} Tier ${watch.tier}`
     );
+
 
     return res.json({
 
@@ -540,9 +558,30 @@ app.post("/room/state", (req, res) => {
     });
 });
 
+
 // ============================================================
 // MARK: - FIST BUMP
 // ============================================================
+//
+// IMPORTANT:
+//
+// A single bump does NOT create a fusion.
+//
+// First watch:
+//
+//     BUMP A
+//        ↓
+//     WAIT
+//
+// Second watch:
+//
+//     BUMP B
+//        ↓
+//     CREATE FUSION
+//
+// This means both watches must physically perform the
+// soft fist bump before fusion happens.
+//
 
 app.post("/room/bump", (req, res) => {
 
@@ -556,6 +595,7 @@ app.post("/room/bump", (req, res) => {
         tier
     } = req.body;
 
+
     // --------------------------------------------------------
     // Validate
     // --------------------------------------------------------
@@ -568,6 +608,7 @@ app.post("/room/bump", (req, res) => {
                 "room/roomCode and watchID are required"
         });
     }
+
 
     // --------------------------------------------------------
     // Room
@@ -585,6 +626,7 @@ app.post("/room/bump", (req, res) => {
         });
     }
 
+
     // --------------------------------------------------------
     // Source Watch
     // --------------------------------------------------------
@@ -601,8 +643,9 @@ app.post("/room/bump", (req, res) => {
         });
     }
 
+
     // --------------------------------------------------------
-    // Find other Watch
+    // Other Watch
     // --------------------------------------------------------
 
     const otherWatchID =
@@ -621,18 +664,26 @@ app.post("/room/bump", (req, res) => {
     const otherWatch =
         room.watches[otherWatchID];
 
+
     // --------------------------------------------------------
     // Update source state
     // --------------------------------------------------------
 
-    sourceWatch.element =
-        normalizeElement(element);
+    if (element !== undefined) {
 
-    sourceWatch.tier =
-        Number(tier);
+        sourceWatch.element =
+            normalizeElement(element);
+    }
+
+    if (tier !== undefined) {
+
+        sourceWatch.tier =
+            Number(tier);
+    }
 
     sourceWatch.lastSeen =
         now();
+
 
     // --------------------------------------------------------
     // Tier validation
@@ -662,6 +713,7 @@ app.post("/room/bump", (req, res) => {
         });
     }
 
+
     // --------------------------------------------------------
     // Element validation
     // --------------------------------------------------------
@@ -684,15 +736,108 @@ app.post("/room/bump", (req, res) => {
         });
     }
 
+
+    // --------------------------------------------------------
+    // IMPORTANT:
+    //
+    // Record THIS watch's bump.
+    //
+    // Do not immediately create fusion.
+    //
+    // This is what allows both watches to bump.
+    // --------------------------------------------------------
+
+    const bumpID =
+        eventID ||
+        makeID("bump");
+
+    sourceWatch.bump = {
+
+        eventID:
+            bumpID,
+
+        element:
+            sourceWatch.element,
+
+        tier:
+            sourceWatch.tier,
+
+        createdAt:
+            now()
+    };
+
+
+    console.log("");
+    console.log("🤜🤛 BUMP RECEIVED");
+    console.log(
+        "Room:",
+        roomCode
+    );
+    console.log(
+        "Watch:",
+        watchID
+    );
+    console.log(
+        "Element:",
+        sourceWatch.element
+    );
+    console.log(
+        "Tier:",
+        sourceWatch.tier
+    );
+    console.log("");
+
+
+    // --------------------------------------------------------
+    // Check whether OTHER watch has also bumped
+    // --------------------------------------------------------
+
+    if (!otherWatch.bump) {
+
+        return res.json({
+
+            success:
+                true,
+
+            status:
+                "WAITING_FOR_OTHER_WATCH",
+
+            roomCode,
+
+            watchID,
+
+            bumpID
+        });
+    }
+
+
+    // ========================================================
+    // BOTH WATCHES HAVE BUMPED
+    // ========================================================
+
+    console.log("");
+    console.log("🤜🤛 BOTH WATCHES BUMPED");
+    console.log(
+        "Watch A:",
+        sourceWatch.watchID
+    );
+    console.log(
+        "Watch B:",
+        otherWatch.watchID
+    );
+    console.log("");
+
+
     // --------------------------------------------------------
     // Calculate fusion
     // --------------------------------------------------------
 
     const result =
         calculateFusion(
-            sourceWatch.element,
-            otherWatch.element
+            sourceWatch.bump.element,
+            otherWatch.bump.element
         );
+
 
     // --------------------------------------------------------
     // Invalid combination
@@ -703,11 +848,15 @@ app.post("/room/bump", (req, res) => {
         console.log("");
         console.log("❌ NO FUSION");
         console.log(
-            sourceWatch.element,
+            sourceWatch.bump.element,
             "+",
-            otherWatch.element
+            otherWatch.bump.element
         );
         console.log("");
+
+        // Clear both bumps so they can try again.
+        sourceWatch.bump = null;
+        otherWatch.bump = null;
 
         return res.status(400).json({
 
@@ -722,89 +871,138 @@ app.post("/room/bump", (req, res) => {
         });
     }
 
+
     // --------------------------------------------------------
-    // Event ID
+    // Create NEW fusion transaction
     // --------------------------------------------------------
+
+    const fusionID =
+        makeID("fusion");
 
     const finalEventID =
-        eventID ||
-        `${watchID}-${now()}`;
+        makeID("event");
 
-    // --------------------------------------------------------
-    // IMPORTANT
-    //
-    // The BUMP event uses the source Watch's element.
-    //
-    // The receiving Watch already knows its own element
-    // through /room/poll → otherWatch.
-    //
-    // FusionBLE then calculates:
-    //
-    // localElement + remoteElement
-    //
-    // --------------------------------------------------------
 
-    const event =
-        makeBumpEvent({
+    const fusionEvent =
+        makeFusionEvent({
 
-            watchID:
-                watchID,
+            fusionID,
 
             eventID:
                 finalEventID,
 
-            element:
-                sourceWatch.element,
+            sourceWatchID:
+                sourceWatch.watchID,
 
-            tier:
-                sourceWatch.tier,
+            targetWatchID:
+                otherWatch.watchID,
 
-            result:
-                result
+            sourceElement:
+                sourceWatch.bump.element,
+
+            targetElement:
+                otherWatch.bump.element,
+
+            sourceTier:
+                sourceWatch.bump.tier,
+
+            targetTier:
+                otherWatch.bump.tier,
+
+            result
         });
 
+
     // --------------------------------------------------------
-    // Store event
+    // Store fusion transaction
     // --------------------------------------------------------
 
-    room.event =
-        event;
+    room.fusion = {
+
+        fusionID,
+
+        eventID:
+            finalEventID,
+
+        type:
+            "FUSION",
+
+        result,
+
+        createdAt:
+            fusionEvent.createdAt,
+
+        sourceWatchID:
+            sourceWatch.watchID,
+
+        targetWatchID:
+            otherWatch.watchID,
+
+        event:
+            fusionEvent,
+
+        acknowledgedBy: {}
+
+    };
+
+
+    // --------------------------------------------------------
+    // Clear bumps
+    //
+    // IMPORTANT:
+    //
+    // The bump has already been converted into a fusion.
+    // Clearing bump allows the SAME TWO WATCHES to perform
+    // another fusion later.
+    // --------------------------------------------------------
+
+    sourceWatch.bump = null;
+    otherWatch.bump = null;
+
 
     // --------------------------------------------------------
     // Log
     // --------------------------------------------------------
 
     console.log("");
-    console.log("🤜🤛 FIST BUMP");
+    console.log("==========================================");
+    console.log("🔥 FUSION CREATED");
+    console.log("==========================================");
     console.log(
         "Room:",
         roomCode
     );
     console.log(
-        "Source:",
-        watchID
+        "Fusion ID:",
+        fusionID
     );
     console.log(
-        "Target:",
-        otherWatchID
-    );
-    console.log(
-        "Source Element:",
-        sourceWatch.element
-    );
-    console.log(
-        "Remote Element:",
-        otherWatch.element
-    );
-    console.log(
-        "Fusion:",
-        result
-    );
-    console.log(
-        "Event:",
+        "Event ID:",
         finalEventID
     );
+    console.log(
+        "Watch A:",
+        sourceWatch.watchID
+    );
+    console.log(
+        "Element A:",
+        fusionEvent.sourceElement
+    );
+    console.log(
+        "Watch B:",
+        otherWatch.watchID
+    );
+    console.log(
+        "Element B:",
+        fusionEvent.targetElement
+    );
+    console.log(
+        "Result:",
+        result
+    );
+    console.log("==========================================");
     console.log("");
+
 
     // --------------------------------------------------------
     // Response
@@ -815,14 +1013,38 @@ app.post("/room/bump", (req, res) => {
         success:
             true,
 
+        status:
+            "FUSION_CREATED",
+
+        roomCode,
+
+        fusionID,
+
+        eventID:
+            finalEventID,
+
+        result,
+
         event:
-            event
+            fusionEvent
     });
 });
 
+
 // ============================================================
-// MARK: - FUSION RESULT EVENT
+// MARK: - FUSION ACKNOWLEDGEMENT
 // ============================================================
+//
+// Each watch calls this after it has received and activated
+// the fusion.
+//
+// Example:
+//
+// Watch A → ACK fusion-123
+// Watch B → ACK fusion-123
+//
+// Once both have acknowledged, the server clears the fusion.
+//
 
 app.post("/room/event", (req, res) => {
 
@@ -832,158 +1054,11 @@ app.post("/room/event", (req, res) => {
     const {
         watchID,
         eventID,
+        fusionID,
         type,
         result
     } = req.body;
 
-    if (!roomCode || !watchID) {
-
-        return res.status(400).json({
-
-            error:
-                "room/roomCode and watchID are required"
-        });
-    }
-
-    const room =
-        getRoom(roomCode);
-
-    if (!room) {
-
-        return res.status(404).json({
-
-            error:
-                "Room not found"
-        });
-    }
-
-    const watch =
-        room.watches[watchID];
-
-    if (!watch) {
-
-        return res.status(404).json({
-
-            error:
-                "Watch not registered"
-        });
-    }
-
-    // --------------------------------------------------------
-    // Only accept valid fusion result
-    // --------------------------------------------------------
-
-    if (type === "FUSION_RESULT") {
-
-        const validResults = [
-            "ff",
-            "g",
-            "gt",
-            "s",
-            "sr",
-            "sp"
-        ];
-
-        if (!validResults.includes(result)) {
-
-            return res.status(400).json({
-
-                error:
-                    "Invalid fusion result",
-
-                result
-            });
-        }
-
-        const existingEvent =
-            room.event;
-
-        const finalEventID =
-            eventID ||
-            existingEvent?.eventID ||
-            `${watchID}-${now()}`;
-
-        /*
-         IMPORTANT:
-
-         Preserve the BUMP event's element and tier
-         because FusionBLE's ServerEvent expects them.
-        */
-
-        const event =
-            makeFusionResultEvent({
-
-                watchID:
-                    watchID,
-
-                eventID:
-                    finalEventID,
-
-                result:
-                    result,
-
-                element:
-                    existingEvent?.element || "",
-
-                tier:
-                    existingEvent?.tier || 0
-            });
-
-        room.event =
-            event;
-
-        console.log("");
-        console.log("⚡ FUSION RESULT");
-        console.log(
-            "Room:",
-            roomCode
-        );
-        console.log(
-            "Watch:",
-            watchID
-        );
-        console.log(
-            "Result:",
-            result
-        );
-        console.log(
-            "Event:",
-            finalEventID
-        );
-        console.log("");
-
-        return res.json({
-
-            success:
-                true,
-
-            event:
-                event
-        });
-    }
-
-    return res.status(400).json({
-
-        error:
-            "Unsupported event type"
-    });
-});
-
-// ============================================================
-// MARK: - POLL
-// ============================================================
-
-app.get("/room/poll", (req, res) => {
-
-    const roomCode =
-        req.query.roomCode ||
-        req.query.room;
-
-    const watchID =
-        req.query.watchID;
-
-    const since =
-        req.query.since;
 
     // --------------------------------------------------------
     // Validate
@@ -997,6 +1072,7 @@ app.get("/room/poll", (req, res) => {
                 "room/roomCode and watchID are required"
         });
     }
+
 
     // --------------------------------------------------------
     // Room
@@ -1014,6 +1090,7 @@ app.get("/room/poll", (req, res) => {
         });
     }
 
+
     // --------------------------------------------------------
     // Watch
     // --------------------------------------------------------
@@ -1030,8 +1107,307 @@ app.get("/room/poll", (req, res) => {
         });
     }
 
+
+    // --------------------------------------------------------
+    // Only FUSION_RESULT is accepted
+    // --------------------------------------------------------
+
+    if (type !== "FUSION_RESULT") {
+
+        return res.status(400).json({
+
+            error:
+                "Unsupported event type"
+        });
+    }
+
+
+    // --------------------------------------------------------
+    // Current fusion
+    // --------------------------------------------------------
+
+    const fusion =
+        room.fusion;
+
+    if (!fusion) {
+
+        return res.status(404).json({
+
+            error:
+                "No active fusion"
+        });
+    }
+
+
+    // --------------------------------------------------------
+    // Verify fusion ID
+    // --------------------------------------------------------
+
+    if (
+        fusionID &&
+        fusion.fusionID !== fusionID
+    ) {
+
+        return res.status(409).json({
+
+            error:
+                "Fusion ID does not match active fusion",
+
+            activeFusionID:
+                fusion.fusionID,
+
+            receivedFusionID:
+                fusionID
+        });
+    }
+
+
+    // --------------------------------------------------------
+    // Verify event ID
+    // --------------------------------------------------------
+
+    if (
+        eventID &&
+        fusion.eventID !== eventID
+    ) {
+
+        return res.status(409).json({
+
+            error:
+                "Event ID does not match active fusion",
+
+            activeEventID:
+                fusion.eventID,
+
+            receivedEventID:
+                eventID
+        });
+    }
+
+
+    // --------------------------------------------------------
+    // Verify result
+    // --------------------------------------------------------
+
+    const validResults = [
+        "ff",
+        "g",
+        "gt",
+        "s",
+        "sr",
+        "sp"
+    ];
+
+    if (!validResults.includes(result)) {
+
+        return res.status(400).json({
+
+            error:
+                "Invalid fusion result",
+
+            result
+        });
+    }
+
+
+    // --------------------------------------------------------
+    // ACK
+    // --------------------------------------------------------
+
+    fusion.acknowledgedBy[watchID] =
+        now();
+
+
+    console.log("");
+    console.log("✅ FUSION ACK");
+    console.log(
+        "Room:",
+        roomCode
+    );
+    console.log(
+        "Watch:",
+        watchID
+    );
+    console.log(
+        "Fusion:",
+        fusion.fusionID
+    );
+    console.log(
+        "Result:",
+        result
+    );
+    console.log("");
+
+
+    // --------------------------------------------------------
+    // Count acknowledgements
+    // --------------------------------------------------------
+
+    const registeredWatchIDs =
+        Object.keys(room.watches);
+
+    const acknowledgedWatchIDs =
+        Object.keys(fusion.acknowledgedBy);
+
+    const allAcknowledged =
+        registeredWatchIDs.length >= 2 &&
+        registeredWatchIDs.every(
+            id =>
+                acknowledgedWatchIDs.includes(id)
+        );
+
+
+    // --------------------------------------------------------
+    // Both watches finished
+    // --------------------------------------------------------
+
+    if (allAcknowledged) {
+
+        console.log("");
+        console.log("==========================================");
+        console.log("✅ BOTH WATCHES ACKNOWLEDGED FUSION");
+        console.log("==========================================");
+        console.log(
+            "Fusion:",
+            fusion.fusionID
+        );
+        console.log(
+            "Result:",
+            fusion.result
+        );
+        console.log("==========================================");
+        console.log("");
+
+
+        // Clear completed fusion.
+        room.fusion = null;
+
+
+        return res.json({
+
+            success:
+                true,
+
+            status:
+                "FUSION_COMPLETED",
+
+            roomCode,
+
+            fusionID:
+                fusion.fusionID,
+
+            eventID:
+                fusion.eventID,
+
+            result:
+                fusion.result
+        });
+    }
+
+
+    // --------------------------------------------------------
+    // Still waiting
+    // --------------------------------------------------------
+
+    return res.json({
+
+        success:
+            true,
+
+        status:
+            "WAITING_FOR_OTHER_ACK",
+
+        roomCode,
+
+        fusionID:
+            fusion.fusionID,
+
+        eventID:
+            fusion.eventID,
+
+        result:
+            fusion.result,
+
+        acknowledgedBy:
+            Object.keys(fusion.acknowledgedBy)
+    });
+});
+
+
+// ============================================================
+// MARK: - POLL
+// ============================================================
+//
+// Each watch polls this endpoint.
+//
+// The same active fusion is returned to BOTH watches.
+//
+// A watch that already acknowledged the fusion can still
+// receive the event safely, but FusionBLE should ignore an
+// already-processed fusionID.
+//
+
+app.get("/room/poll", (req, res) => {
+
+    const roomCode =
+        req.query.roomCode ||
+        req.query.room;
+
+    const watchID =
+        req.query.watchID;
+
+
+    // --------------------------------------------------------
+    // Validate
+    // --------------------------------------------------------
+
+    if (!roomCode || !watchID) {
+
+        return res.status(400).json({
+
+            error:
+                "room/roomCode and watchID are required"
+        });
+    }
+
+
+    // --------------------------------------------------------
+    // Room
+    // --------------------------------------------------------
+
+    const room =
+        getRoom(roomCode);
+
+    if (!room) {
+
+        return res.status(404).json({
+
+            error:
+                "Room not found"
+        });
+    }
+
+
+    // --------------------------------------------------------
+    // Watch
+    // --------------------------------------------------------
+
+    const watch =
+        room.watches[watchID];
+
+    if (!watch) {
+
+        return res.status(404).json({
+
+            error:
+                "Watch not registered"
+        });
+    }
+
+
     watch.lastSeen =
         now();
+
 
     // --------------------------------------------------------
     // Other Watch
@@ -1046,26 +1422,26 @@ app.get("/room/poll", (req, res) => {
             ? room.watches[otherWatchID]
             : null;
 
+
     // --------------------------------------------------------
-    // Event
+    // Active fusion
     // --------------------------------------------------------
 
-    let event =
-        room.event;
+    let fusion =
+        room.fusion;
 
-    if (since && event) {
 
-        const sinceNumber =
-            Number(since);
+    // --------------------------------------------------------
+    // IMPORTANT:
+    //
+    // Do NOT use the client's old timestamp to delete the
+    // fusion event.
+    //
+    // The fusion remains available until BOTH watches ACK it.
+    //
+    // This fixes the repeated-fusion problem.
+    // --------------------------------------------------------
 
-        if (
-            Number.isFinite(sinceNumber) &&
-            event.createdAt <= sinceNumber
-        ) {
-
-            event = null;
-        }
-    }
 
     // --------------------------------------------------------
     // Response
@@ -1097,14 +1473,50 @@ app.get("/room/poll", (req, res) => {
                         otherWatch.tier,
 
                     lastSeen:
-                        otherWatch.lastSeen
+                        otherWatch.lastSeen,
+
+                    hasBumped:
+                        otherWatch.bump !== null
                 }
                 : null,
 
-        event:
-            event
+        fusion:
+            fusion
+                ? {
+
+                    fusionID:
+                        fusion.fusionID,
+
+                    eventID:
+                        fusion.eventID,
+
+                    type:
+                        fusion.type,
+
+                    result:
+                        fusion.result,
+
+                    sourceWatchID:
+                        fusion.sourceWatchID,
+
+                    targetWatchID:
+                        fusion.targetWatchID,
+
+                    event:
+                        fusion.event,
+
+                    acknowledgedBy:
+                        Object.keys(
+                            fusion.acknowledgedBy
+                        ),
+
+                    createdAt:
+                        fusion.createdAt
+                }
+                : null
     });
 });
+
 
 // ============================================================
 // MARK: - RESET ROOM
@@ -1115,6 +1527,11 @@ app.post("/room/reset", (req, res) => {
     const roomCode =
         getRoomCode(req.body);
 
+
+    // --------------------------------------------------------
+    // Validate
+    // --------------------------------------------------------
+
     if (!roomCode) {
 
         return res.status(400).json({
@@ -1123,6 +1540,11 @@ app.post("/room/reset", (req, res) => {
                 "room/roomCode is required"
         });
     }
+
+
+    // --------------------------------------------------------
+    // Room
+    // --------------------------------------------------------
 
     const room =
         getRoom(roomCode);
@@ -1136,8 +1558,18 @@ app.post("/room/reset", (req, res) => {
         });
     }
 
-    room.event =
+
+    // --------------------------------------------------------
+    // Clear fusion
+    // --------------------------------------------------------
+
+    room.fusion =
         null;
+
+
+    // --------------------------------------------------------
+    // Reset watches
+    // --------------------------------------------------------
 
     Object.values(room.watches)
         .forEach(watch => {
@@ -1148,13 +1580,18 @@ app.post("/room/reset", (req, res) => {
             watch.tier =
                 1;
 
+            watch.bump =
+                null;
+
             watch.lastSeen =
                 now();
         });
 
+
     console.log(
         `🔄 ROOM RESET: ${roomCode}`
     );
+
 
     return res.json({
 
@@ -1168,6 +1605,7 @@ app.post("/room/reset", (req, res) => {
     });
 });
 
+
 // ============================================================
 // MARK: - DEBUG ROOM
 // ============================================================
@@ -1180,6 +1618,7 @@ app.get("/room/:roomCode", (req, res) => {
     const room =
         getRoom(roomCode);
 
+
     if (!room) {
 
         return res.status(404).json({
@@ -1189,6 +1628,7 @@ app.get("/room/:roomCode", (req, res) => {
         });
     }
 
+
     return res.json({
 
         roomCode,
@@ -1196,10 +1636,11 @@ app.get("/room/:roomCode", (req, res) => {
         watches:
             room.watches,
 
-        event:
-            room.event
+        fusion:
+            room.fusion
     });
 });
+
 
 // ============================================================
 // MARK: - START SERVER
@@ -1212,18 +1653,55 @@ app.listen(PORT, () => {
     console.log("       BBBG FUSION SERVER");
     console.log("==========================================");
     console.log("");
+
     console.log(
         `🚀 Server running on port ${PORT}`
     );
+
     console.log("");
+
     console.log("Supported fusions:");
-    console.log("🔥 Ice + Blaze     = FF");
-    console.log("❄️  Ice + Quake     = G");
-    console.log("⚡ Thunder + Quake  = Gt");
-    console.log("☀️  Solar + Thunder = S");
-    console.log("🌞 Solar + Thorn    = Sr");
-    console.log("🌪️  Solar + Cyclone = Sp");
+
+    console.log(
+        "🔥 Ice + Blaze     = FF"
+    );
+
+    console.log(
+        "❄️  Ice + Quake     = G"
+    );
+
+    console.log(
+        "⚡ Thunder + Quake  = Gt"
+    );
+
+    console.log(
+        "☀️  Solar + Thunder = S"
+    );
+
+    console.log(
+        "🌞 Solar + Thorn    = Sr"
+    );
+
+    console.log(
+        "🌪️  Solar + Cyclone = Sp"
+    );
+
     console.log("");
+
+    console.log(
+        "🤜🤛 Two-watch bump synchronization: ENABLED"
+    );
+
+    console.log(
+        "🔁 Repeated fusion transactions: ENABLED"
+    );
+
+    console.log(
+        "✅ Two-watch acknowledgement: ENABLED"
+    );
+
+    console.log("");
+
     console.log("==========================================");
     console.log("");
 });
